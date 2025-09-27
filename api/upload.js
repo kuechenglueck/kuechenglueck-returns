@@ -15,12 +15,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { filename, fileContent } = req.body;
+    const { filename, fileContent, mimeType } = req.body;
+
     if (!filename || !fileContent) {
-      return res.status(400).json({ error: "Filename and fileContent required" });
+      return res.status(400).json({ error: "No file data provided" });
     }
 
-    // Hole neuen Access Token über Refresh Token
+    // Access Token via Refresh Token generieren
     const tokenResponse = await fetch("https://api.dropboxapi.com/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -62,6 +63,7 @@ export default async function handler(req, res) {
 
     const uploadedFile = await uploadResponse.json();
     return res.status(200).json({ success: true, file: uploadedFile });
+
   } catch (err) {
     return res.status(500).json({ error: "Unexpected error", details: err.message });
   }
