@@ -1,36 +1,4 @@
-import fetch from "node-fetch";
-
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "10mb", // max. Requestgröße
-    },
-  },
-};
-
-// Funktion: Holt bei jedem Request ein neues Access Token mit dem Refresh Token
-async function getAccessToken() {
-  const res = await fetch("https://api.dropboxapi.com/oauth2/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: process.env.DROPBOX_REFRESH_TOKEN,
-      client_id: process.env.DROPBOX_APP_KEY,
-      client_secret: process.env.DROPBOX_APP_SECRET,
-    }),
-  });
-
-  if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error("Failed to refresh Dropbox token: " + errorText);
-  }
-
-  const data = await res.json();
-  return data.access_token;
-}
+// api/upload.js
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -38,77 +6,107 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { files } = req.body; // erwartet: [{name, type, data(base64)}]
+    const { files } = req.body;
 
-    if (!files || !Array.isArray(files) || files.length === 0) {
+    if (!files || !files.length) {
       return res.status(400).json({ error: "No files provided" });
     }
 
-    if (files.length > 1) {
-      return res.status(400).json({ error: "Only 1 file allowed" });
+    // ---- 1. Frischen Access Token mit Refresh Token holen ----
+    const tokenResponse = await fetch("https://api.dropbox.com/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: process.env.DROPBOX_REFRESH_TOKEN,
+        client_id: process.env.DROPBOX_APP_KEY,
+        client_secret: process.env.DROPBOX_APP_SECRET,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      console.error("Error fetching access token:", tokenData);
+      return res
+        .status(500)
+        .json({ error: "Failed to refresh access token", details: tokenData });
     }
 
-    const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/heic"];
+    const accessToken = tokenData.access_token;
+
+    // ---- 2. Dateien zu Dropbox hochladen ----
     const uploadedFiles = [];
 
-    // Frisches Access Token holen
-    const accessToken = await getAccessToken();
+    for (const file of files) {
+      const fileBuffer = Buffer.from(file.data, "base64");
 
-    for (let file of files) {
-      const { name, type, data } = file;
+      const uploadResponse = await fetch(
+        "https://content.dropboxapi.com/2/files/upload",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Dropbox-API-Arg": JSON.stringify({
+              path: `/${file.name}`,
+              mode: "add",
+              autorename: true,
+              mute: false,
+              strict_conflict: false,
+            }),
+            "Content-Type": "application/octet-stream",
+          },
+          body: fileBuffer,
+        }
+      );
 
-      if (!allowedTypes.includes(type)) {
-        return res.status(400).json({ error: `File type not allowed: ${type}` });
+      const uploadData = await uploadResponse.json();
+
+      if (!uploadResponse.ok) {
+        console.error("Dropbox upload error:", uploadData);
+        return res
+          .status(500)
+          .json({ error: "Failed to upload file", details: uploadData });
       }
 
-      const buffer = Buffer.from(data, "base64");
-
-      // Upload zu Dropbox
-      const dropboxUpload = await fetch("https://content.dropboxapi.com/2/files/upload", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "Dropbox-API-Arg": JSON.stringify({
-            path: `/${Date.now()}-${name}`,
-            mode: "add",
-            autorename: true,
-            mute: false,
+      // ---- 3. Einen freigegebenen Link für die Datei erstellen ----
+      const linkResponse = await fetch(
+        "https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            path: uploadData.path_lower,
+            settings: { requested_visibility: "public" },
           }),
-          "Content-Type": "application/octet-stream",
-        },
-        body: buffer,
-      });
+        }
+      );
 
-      if (!dropboxUpload.ok) {
-        const error = await dropboxUpload.text();
-        return res.status(500).json({ error: "Dropbox upload failed", details: error });
+      const linkData = await linkResponse.json();
+
+      if (!linkResponse.ok) {
+        console.error("Dropbox link error:", linkData);
+        return res
+          .status(500)
+          .json({ error: "Failed to create shared link", details: linkData });
       }
 
-      const uploadedMeta = await dropboxUpload.json();
+      // Public Link etwas schöner machen (dl=1 für Direktlink)
+      const publicLink = linkData.url.replace("?dl=0", "?raw=1");
 
-      // Share Link erzeugen
-      const shareRes = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ path: uploadedMeta.path_lower }),
+      uploadedFiles.push({
+        name: file.name,
+        link: publicLink,
       });
-
-      const shareData = await shareRes.json();
-
-      if (!shareData.url) {
-        return res.status(500).json({ error: "Failed to create share link", details: shareData });
-      }
-
-      const directLink = shareData.url.replace("?dl=0", "?raw=1");
-      uploadedFiles.push({ name, link: directLink });
     }
 
+    // ---- 4. Antwort zurückgeben ----
     return res.status(200).json({ success: true, files: uploadedFiles });
-  } catch (err) {
-    console.error("Upload error:", err);
-    return res.status(500).json({ error: "Internal server error", details: err.message });
+  } catch (error) {
+    console.error("Unexpected error:", error);
+    return res.status(500).json({ error: "Unexpected error", details: error });
   }
 }
