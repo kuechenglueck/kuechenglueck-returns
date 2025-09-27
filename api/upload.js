@@ -1,12 +1,5 @@
+// api/upload.js
 import fetch from "node-fetch";
-
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "10mb", // maximale Größe pro Request
-    },
-  },
-};
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -14,7 +7,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    // === 1. Neuen Access Token mit dem Refresh Token anfordern ===
+    const { files } = req.body;
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: "No files provided" });
+    }
+
+    // ---- Schritt 1: Neuen Access Token über Refresh Token holen ----
     const tokenResponse = await fetch("https://api.dropboxapi.com/oauth2/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -27,83 +25,67 @@ export default async function handler(req, res) {
     });
 
     const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      console.error("Error fetching access token:", tokenData);
+      return res.status(500).json({ error: "Failed to refresh access token", details: tokenData });
+    }
+
     const accessToken = tokenData.access_token;
 
-    if (!accessToken) {
-      return res.status(500).json({ error: "Token fetch failed", details: tokenData });
-    }
-
-    // === 2. Dateien aus dem Request holen ===
-    const { files } = req.body; // erwartet [{name, type, data(base64)}]
-
-    if (!files || !Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: "No files provided" });
-    }
-
-    if (files.length > 3) {
-      return res.status(400).json({ error: "Max 3 files allowed" });
-    }
-
-    const allowedTypes = ["image/jpeg", "image/jpg", "image/png", "image/heic"];
+    // ---- Schritt 2: Datei(en) zu Dropbox hochladen ----
     const uploadedFiles = [];
 
-    for (let file of files) {
-      const { name, type, data } = file;
-
-      if (!allowedTypes.includes(type)) {
-        return res.status(400).json({ error: `File type not allowed: ${type}` });
-      }
-
-      const buffer = Buffer.from(data, "base64");
-
-      // === 3. Datei zu Dropbox hochladen ===
-      const uploadRes = await fetch("https://content.dropboxapi.com/2/files/upload", {
+    for (const file of files) {
+      const uploadResponse = await fetch("https://content.dropboxapi.com/2/files/upload", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/octet-stream",
           "Dropbox-API-Arg": JSON.stringify({
-            path: `/${Date.now()}-${name}`,
+            path: `/${file.name}`,
             mode: "add",
             autorename: true,
             mute: false,
           }),
-          "Content-Type": "application/octet-stream",
         },
-        body: buffer,
+        body: Buffer.from(file.data, "base64"),
       });
 
-      if (!uploadRes.ok) {
-        const err = await uploadRes.text();
-        return res.status(500).json({ error: "Dropbox upload failed", details: err });
+      const uploadResult = await uploadResponse.json();
+
+      if (!uploadResponse.ok) {
+        console.error("Dropbox upload failed:", uploadResult);
+        return res.status(500).json({ error: "Dropbox upload failed", details: uploadResult });
       }
 
-      const uploadedMeta = await uploadRes.json();
-
-      // === 4. Freigabelink erzeugen ===
-      const shareRes = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
+      // Freigabe-Link erzeugen
+      const shareResponse = await fetch("https://api.dropboxapi.com/2/sharing/create_shared_link_with_settings", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ path: uploadedMeta.path_lower }),
+        body: JSON.stringify({
+          path: uploadResult.path_lower,
+          settings: { requested_visibility: "public" },
+        }),
       });
 
-      const shareData = await shareRes.json();
+      const shareResult = await shareResponse.json();
 
-      if (!shareData.url) {
-        return res.status(500).json({ error: "Failed to create share link", details: shareData });
+      if (!shareResponse.ok) {
+        console.error("Dropbox share link failed:", shareResult);
+        return res.status(500).json({ error: "Failed to create share link", details: shareResult });
       }
 
-      const directLink = shareData.url.replace("?dl=0", "?raw=1");
-      uploadedFiles.push({ name, link: directLink });
+      uploadedFiles.push({ name: file.name, link: shareResult.url.replace("?dl=0", "?dl=1") });
     }
 
-    // === 5. Erfolgsantwort zurück an Shopify-Formular ===
     return res.status(200).json({ success: true, files: uploadedFiles });
 
   } catch (err) {
-    console.error("Upload error:", err);
-    return res.status(500).json({ error: "Internal server error", details: err.message });
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Unexpected server error", details: err.message });
   }
 }
