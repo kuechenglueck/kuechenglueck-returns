@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <title>Dropbox Upload – Backend-Test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; }
+    .row { margin: 12px 0; }
+    button { padding: 10px 16px; border: 0; background: #910F3F; color: #fff; border-radius: 8px; font-weight: 600; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+    pre { background: #f7f7f7; padding: 12px; border-radius: 8px; overflow: auto; }
+    .ok { color: #0a7a0a; }
+    .err { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>Dropbox Upload – Backend-Test</h1>
+
+  <div class="row">
+    <label>Bestellnummer (optional):</label>
+    <input id="order" type="text" placeholder="z.B. 123456" />
+  </div>
+  <div class="row">
+    <label>Bild (JPG/PNG/HEIC, max. 10 MB):</label>
+    <input id="file" type="file" accept=".jpg,.jpeg,.png,.heic" />
+  </div>
+  <div class="row">
+    <button id="btn">Upload starten</button>
+  </div>
+
+  <div class="row">
+    <div id="msg"></div>
+    <pre id="out"></pre>
+  </div>
+
+<script>
+const btn = document.getElementById('btn');
+const fileInput = document.getElementById('file');
+const orderInput = document.getElementById('order');
+const msg = document.getElementById('msg');
+const out = document.getElementById('out');
+
+btn.addEventListener('click', async () => {
+  msg.textContent = '';
+  out.textContent = '';
+  const file = fileInput.files[0];
+  if (!file) { msg.innerHTML = '<span class="err">Bitte eine Datei wählen.</span>'; return; }
+
+  const allowedExt = ['jpg','jpeg','png','heic'];
+  const allowedMime = ['image/jpeg','image/png','image/heic','image/heif'];
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+
+  if (!allowedExt.includes(ext) || !allowedMime.includes(file.type)) {
+    msg.innerHTML = '<span class="err">Nur JPG, JPEG, PNG, HEIC erlaubt.</span>';
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    msg.innerHTML = '<span class="err">Datei > 10 MB.</span>';
+    return;
+  }
+
+  btn.disabled = true;
+  msg.textContent = 'Lade hoch...';
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('order_number', orderInput.value.trim());
+
+    const resp = await fetch('/api/upload', { method: 'POST', body: fd });
+    const data = await resp.json();
+    out.textContent = JSON.stringify(data, null, 2);
+
+    if (data.ok && data.link) {
+      msg.innerHTML = `<span class="ok">Upload ok:</span> <a href="${data.link}" target="_blank" rel="noopener">Foto öffnen</a>`;
+    } else {
+      msg.innerHTML = `<span class="err">Fehler (Server):</span> ${data.error || 'Unbekannt'}`;
+    }
+  } catch (err) {
+    msg.innerHTML = `<span class="err">Fehler (Client):</span> ${String(err)}`;
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
