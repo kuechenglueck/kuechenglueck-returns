@@ -1,8 +1,10 @@
 {
-  "name": "kuechenglueck-returns",
+  "name": "dropbox-upload-api",
   "version": "1.0.0",
-  "type": "module",
+  "private": true,
+  "license": "MIT",
   "dependencies": {
-    "node-fetch": "^2.6.7"
-  }
+    "busboy": "^1.6.0"
+  },
+  "engines": { "node": ">=18" }
 }
